@@ -17,30 +17,10 @@ channel_name = "Dark Psychology®"
 
 print(f"DEBUG: Processing {len(scenes_data)} scenes async...")
 
-# 👇 FIX 1: Updated fallbacks to relate more to human behavior & psychology to avoid black screens
-FALLBACK_KEYWORDS = ["human eye dark", "people silhouette", "cinematic face", "shadows moving", "abstract dark"]
+# 👇 Ultra-safe fallback keywords for guaranteed videos
+FALLBACK_KEYWORDS = ["shadows moving", "dark room", "cinematic face", "night city", "abstract dark", "black background"]
 
 TEMP_DIR = "/dev/shm" if os.path.exists("/dev/shm") else os.getcwd()
-
-async def fetch_pexels_video(session, keyword):
-    queries_to_try = [keyword] + FALLBACK_KEYWORDS
-    for query in queries_to_try:
-        for attempt in range(2):
-            try:
-                await asyncio.sleep(random.uniform(0.1, 0.5))
-                # 👇 FIX 1.1: Safely picking pages so we don't hit empty results (No random page 5 for niche keywords)
-                page = 1 if query == keyword else random.randint(1, 2) 
-                # Increased per_page to 15 to get enough variety from just the first few pages
-                url = f"https://api.pexels.com/videos/search?query={query}&per_page=15&page={page}&orientation=landscape&size=large"
-                
-                async with session.get(url, headers={"Authorization": pexels_key}, timeout=10) as response:
-                    if response.status == 200:
-                        res = await response.json()
-                        if res.get('videos') and len(res['videos']) > 0:
-                            return random.choice(res['videos'])['video_files'][0]['link']
-            except Exception:
-                continue
-    return None
 
 async def get_audio_duration(file_path):
     cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', file_path]
@@ -61,6 +41,7 @@ async def process_scene(session, i, scene):
     vid_path = os.path.join(TEMP_DIR, f"raw_vid_{i}.mp4")
     
     try:
+        # --- 1. TTS GENERATION ---
         tts_success = False
         for attempt in range(3):
             try:
@@ -82,21 +63,52 @@ async def process_scene(session, i, scene):
         dur = max(1.0, raw_dur - 0.2) 
         fade_out = max(0, dur - 0.5)
         
-        vid_url = await fetch_pexels_video(session, keyword)
+        # --- 2. GUARANTEED VIDEO FETCH & DOWNLOAD LOOP ---
         is_valid_video = False
+        queries_to_try = [keyword] + FALLBACK_KEYWORDS
         
-        if vid_url:
-            try:
-                async with session.get(vid_url, timeout=15) as resp:
-                    if resp.status == 200:
-                        vid_bytes = await resp.read()
-                        if len(vid_bytes) > 50000: 
-                            with open(vid_path, "wb") as f:
-                                f.write(vid_bytes)
-                            is_valid_video = True
-            except Exception as e:
-                print(f"Failed to download video for scene {i}: {str(e)}")
+        for query in queries_to_try:
+            if is_valid_video: 
+                break
+            for attempt in range(2):
+                if is_valid_video: 
+                    break
+                try:
+                    await asyncio.sleep(random.uniform(0.5, 1.5)) # Prevent rate-limiting
+                    page = 1 if query == keyword else random.randint(1, 2) 
+                    # Removed size restriction to maximize available videos
+                    url = f"https://api.pexels.com/videos/search?query={query}&per_page=15&page={page}&orientation=landscape"
+                    
+                    async with session.get(url, headers={"Authorization": pexels_key}, timeout=10) as response:
+                        if response.status == 200:
+                            res = await response.json()
+                            videos = res.get('videos', [])
+                            if videos:
+                                random.shuffle(videos)
+                                # Try downloading up to 3 different videos to guarantee success
+                                for v in videos[:3]:
+                                    try:
+                                        # Get HD link if available, else fallback to standard
+                                        vid_url = v['video_files'][0]['link']
+                                        for vf in v['video_files']:
+                                            if vf.get('quality') == 'hd':
+                                                vid_url = vf['link']
+                                                break
+                                                
+                                        async with session.get(vid_url, timeout=15) as vid_resp:
+                                            if vid_resp.status == 200:
+                                                vid_bytes = await vid_resp.read()
+                                                if len(vid_bytes) > 50000: # Ensure file is not corrupted
+                                                    with open(vid_path, "wb") as f:
+                                                        f.write(vid_bytes)
+                                                    is_valid_video = True
+                                                    break # Exit inner download loop
+                                    except Exception:
+                                        continue # Try the next video link
+                except Exception:
+                    continue # Try the next query/attempt
 
+        # --- 3. VIDEO RENDER ---
         pop_path = os.path.abspath("pop.mp3")
         has_pop = os.path.exists(pop_path)
 
@@ -105,6 +117,7 @@ async def process_scene(session, i, scene):
             if has_pop: cmd += ['-i', pop_path]
             v_filter = f"[0:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,format=yuv420p,fps=30,eq=contrast=1.2:saturation=0.85,drawtext=text='{channel_name}':fontcolor=white@0.3:fontsize=48:x=w-tw-50:y=h-th-50,fade=t=in:st=0:d=0.5,fade=t=out:st={fade_out}:d=0.5[v]"
         else:
+            # Absolute worst-case fallback (if Pexels is completely down)
             cmd = ['ffmpeg', '-y', '-f', 'lavfi', '-i', f'color=c=#101015:s=1920x1080:d={dur}', '-ss', '0.2', '-i', raw_mp3]
             if has_pop: cmd += ['-i', pop_path]
             v_filter = f"[0:v]drawtext=text='{channel_name}':fontcolor=white@0.3:fontsize=48:x=w-tw-50:y=h-th-50,fade=t=in:st=0:d=0.5,fade=t=out:st={fade_out}:d=0.5[v]"
@@ -168,10 +181,10 @@ async def main_pipeline():
 
         bgm_path = os.path.abspath("bgm.mp3")
         if os.path.exists(bgm_path):
-            # 👇 FIX 2: BGM Volume increased from 0.08 to 0.15 for better audibility
+            # 👇 FIX: BGM Volume significantly increased to 0.30 (30%)
             bgm_cmd = [
                 'ffmpeg', '-y', '-i', raw_video, '-stream_loop', '-1', '-i', bgm_path,
-                '-filter_complex', '[0:a]volume=1.0[voice];[1:a]volume=0.15[bgm];[voice][bgm]amix=inputs=2:duration=first:dropout_transition=0[aout_mix];[aout_mix]volume=2.0[aout]',
+                '-filter_complex', '[0:a]volume=1.0[voice];[1:a]volume=0.30[bgm];[voice][bgm]amix=inputs=2:duration=first:dropout_transition=0[aout_mix];[aout_mix]volume=2.0[aout]',
                 '-map', '0:v', '-map', '[aout]',
                 '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-shortest', final_video
             ]
