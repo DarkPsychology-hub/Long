@@ -5,19 +5,20 @@ import shutil
 
 # --- VARIABLES ---
 scenes_data = json.loads(os.environ.get('SCENES_DATA', '[]'))
-title = os.environ.get('TITLE', 'Universal Video')
-description = os.environ.get('DESCRIPTION', 'Amazing facts.')
-thumbnail_prompt = os.environ.get('THUMBNAIL_PROMPT', 'Cinematic thumbnail')
+title = os.environ.get('TITLE', 'Dark Psychology Documentary')
+description = os.environ.get('DESCRIPTION', 'Uncovering the dark truths of human behavior.')
+thumbnail_prompt = os.environ.get('THUMBNAIL_PROMPT', 'Cinematic dark psychological thumbnail')
 pexels_key = os.environ.get('PEXELS_API_KEY')
 chat_id = os.environ.get('CHAT_ID')
 telegram_token = os.environ.get('TELEGRAM_BOT_TOKEN')
 
-# 👇 Yahan apna channel name set karein 👇
+# 👇 Channel Watermark
 channel_name = "Dark Psychology®" 
 
 print(f"DEBUG: Processing {len(scenes_data)} scenes async...")
 
-FALLBACK_KEYWORDS = ["abstract motion background", "technology concept", "smartphone interface", "digital data animation", "smooth gradient"]
+# 👇 Updated for Dark Psychology vibe
+FALLBACK_KEYWORDS = ["dark shadow", "cinematic dark", "empty room", "foggy forest", "mysterious silhouette"]
 
 TEMP_DIR = "/dev/shm" if os.path.exists("/dev/shm") else os.getcwd()
 
@@ -49,7 +50,7 @@ async def get_audio_duration(file_path):
         return 5.0 
 
 async def process_scene(session, i, scene):
-    keyword = scene.get('keyword', 'abstract')
+    keyword = scene.get('keyword', 'dark atmosphere')
     text_line = scene.get('text', '').strip()
     if not text_line: return None
     
@@ -61,8 +62,8 @@ async def process_scene(session, i, scene):
         tts_success = False
         for attempt in range(3):
             try:
-                # 👇 UPDATE: Changed from Hindi to USA English Voice 👇
-                communicate = edge_tts.Communicate(text_line, "en-US-ChristopherNeural", rate="+10%")
+                # 👇 Normal rate for deep, suspenseful documentary voice
+                communicate = edge_tts.Communicate(text_line, "en-US-ChristopherNeural")
                 await asyncio.wait_for(communicate.save(raw_mp3), timeout=15.0)
                 tts_success = True
                 break
@@ -101,14 +102,15 @@ async def process_scene(session, i, scene):
         if is_valid_video:
             cmd = ['ffmpeg', '-y', '-ignore_editlist', '1', '-stream_loop', '-1', '-fflags', '+genpts', '-i', vid_path, '-ss', '0.2', '-i', raw_mp3]
             if has_pop: cmd += ['-i', pop_path]
-            v_filter = f"[0:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,format=yuv420p,fps=30,unsharp=5:5:0.5:5:5:0.0,eq=contrast=1.1:saturation=1.25,drawtext=text='{channel_name}':fontcolor=white@0.5:fontsize=48:x=w-tw-50:y=h-th-50,fade=t=in:st=0:d=0.5,fade=t=out:st={fade_out}:d=0.5[v]"
+            # 👇 Added cinematic color grading (contrast=1.2, saturation=0.85) and subtle watermark (white@0.3)
+            v_filter = f"[0:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,format=yuv420p,fps=30,eq=contrast=1.2:saturation=0.85,drawtext=text='{channel_name}':fontcolor=white@0.3:fontsize=48:x=w-tw-50:y=h-th-50,fade=t=in:st=0:d=0.5,fade=t=out:st={fade_out}:d=0.5[v]"
         else:
-            cmd = ['ffmpeg', '-y', '-f', 'lavfi', '-i', f'color=c=#151525:s=1920x1080:d={dur}', '-ss', '0.2', '-i', raw_mp3]
+            cmd = ['ffmpeg', '-y', '-f', 'lavfi', '-i', f'color=c=#101015:s=1920x1080:d={dur}', '-ss', '0.2', '-i', raw_mp3]
             if has_pop: cmd += ['-i', pop_path]
-            v_filter = f"[0:v]drawtext=text='{channel_name}':fontcolor=white@0.5:fontsize=48:x=w-tw-50:y=h-th-50,fade=t=in:st=0:d=0.5,fade=t=out:st={fade_out}:d=0.5[v]"
+            v_filter = f"[0:v]drawtext=text='{channel_name}':fontcolor=white@0.3:fontsize=48:x=w-tw-50:y=h-th-50,fade=t=in:st=0:d=0.5,fade=t=out:st={fade_out}:d=0.5[v]"
 
         if has_pop:
-            a_filter = "[1:a]volume=1.0[voice];[2:a]volume=0.8[pop];[voice][pop]amix=inputs=2:duration=first:dropout_transition=0[aout_mix];[aout_mix]volume=2.0[aout]"
+            a_filter = "[1:a]volume=1.0[voice];[2:a]volume=0.3[pop];[voice][pop]amix=inputs=2:duration=first:dropout_transition=0[aout_mix];[aout_mix]volume=2.0[aout]"
             filter_complex = f"{v_filter};{a_filter}"
             a_map = '[aout]'
         else:
@@ -166,9 +168,10 @@ async def main_pipeline():
 
         bgm_path = os.path.abspath("bgm.mp3")
         if os.path.exists(bgm_path):
+            # 👇 BGM Volume set to exactly 0.08 (8%) to allow voiceover to dominate
             bgm_cmd = [
                 'ffmpeg', '-y', '-i', raw_video, '-stream_loop', '-1', '-i', bgm_path,
-                '-filter_complex', '[0:a]volume=1.0[voice];[1:a]volume=0.4[bgm];[voice][bgm]amix=inputs=2:duration=first:dropout_transition=0[aout_mix];[aout_mix]volume=2.0[aout]',
+                '-filter_complex', '[0:a]volume=1.0[voice];[1:a]volume=0.08[bgm];[voice][bgm]amix=inputs=2:duration=first:dropout_transition=0[aout_mix];[aout_mix]volume=2.0[aout]',
                 '-map', '0:v', '-map', '[aout]',
                 '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-shortest', final_video
             ]
@@ -184,7 +187,7 @@ async def main_pipeline():
             if os.path.exists(r['aud']): os.remove(r['aud'])
 
         # ==========================================
-        # PHASE 3: GITHUB RELEASES (THE ULTIMATE FIX)
+        # PHASE 3: GITHUB RELEASES
         # ==========================================
         video_link = None
         print("\n🚀 Uploading Video directly to GitHub Releases...")
