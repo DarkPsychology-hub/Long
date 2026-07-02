@@ -17,8 +17,8 @@ channel_name = "Dark Psychology®"
 
 print(f"DEBUG: Processing {len(scenes_data)} scenes async...")
 
-# 👇 Updated for Dark Psychology vibe
-FALLBACK_KEYWORDS = ["dark shadow", "cinematic dark", "empty room", "foggy forest", "mysterious silhouette"]
+# 👇 FIX 1: Updated fallbacks to relate more to human behavior & psychology to avoid black screens
+FALLBACK_KEYWORDS = ["human eye dark", "people silhouette", "cinematic face", "shadows moving", "abstract dark"]
 
 TEMP_DIR = "/dev/shm" if os.path.exists("/dev/shm") else os.getcwd()
 
@@ -28,8 +28,10 @@ async def fetch_pexels_video(session, keyword):
         for attempt in range(2):
             try:
                 await asyncio.sleep(random.uniform(0.1, 0.5))
-                random_page = random.randint(1, 5) 
-                url = f"https://api.pexels.com/videos/search?query={query}&per_page=5&page={random_page}&orientation=landscape&size=large"
+                # 👇 FIX 1.1: Safely picking pages so we don't hit empty results (No random page 5 for niche keywords)
+                page = 1 if query == keyword else random.randint(1, 2) 
+                # Increased per_page to 15 to get enough variety from just the first few pages
+                url = f"https://api.pexels.com/videos/search?query={query}&per_page=15&page={page}&orientation=landscape&size=large"
                 
                 async with session.get(url, headers={"Authorization": pexels_key}, timeout=10) as response:
                     if response.status == 200:
@@ -62,7 +64,6 @@ async def process_scene(session, i, scene):
         tts_success = False
         for attempt in range(3):
             try:
-                # 👇 Normal rate for deep, suspenseful documentary voice
                 communicate = edge_tts.Communicate(text_line, "en-US-ChristopherNeural")
                 await asyncio.wait_for(communicate.save(raw_mp3), timeout=15.0)
                 tts_success = True
@@ -102,7 +103,6 @@ async def process_scene(session, i, scene):
         if is_valid_video:
             cmd = ['ffmpeg', '-y', '-ignore_editlist', '1', '-stream_loop', '-1', '-fflags', '+genpts', '-i', vid_path, '-ss', '0.2', '-i', raw_mp3]
             if has_pop: cmd += ['-i', pop_path]
-            # 👇 Added cinematic color grading (contrast=1.2, saturation=0.85) and subtle watermark (white@0.3)
             v_filter = f"[0:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,format=yuv420p,fps=30,eq=contrast=1.2:saturation=0.85,drawtext=text='{channel_name}':fontcolor=white@0.3:fontsize=48:x=w-tw-50:y=h-th-50,fade=t=in:st=0:d=0.5,fade=t=out:st={fade_out}:d=0.5[v]"
         else:
             cmd = ['ffmpeg', '-y', '-f', 'lavfi', '-i', f'color=c=#101015:s=1920x1080:d={dur}', '-ss', '0.2', '-i', raw_mp3]
@@ -168,10 +168,10 @@ async def main_pipeline():
 
         bgm_path = os.path.abspath("bgm.mp3")
         if os.path.exists(bgm_path):
-            # 👇 BGM Volume set to exactly 0.08 (8%) to allow voiceover to dominate
+            # 👇 FIX 2: BGM Volume increased from 0.08 to 0.15 for better audibility
             bgm_cmd = [
                 'ffmpeg', '-y', '-i', raw_video, '-stream_loop', '-1', '-i', bgm_path,
-                '-filter_complex', '[0:a]volume=1.0[voice];[1:a]volume=0.08[bgm];[voice][bgm]amix=inputs=2:duration=first:dropout_transition=0[aout_mix];[aout_mix]volume=2.0[aout]',
+                '-filter_complex', '[0:a]volume=1.0[voice];[1:a]volume=0.15[bgm];[voice][bgm]amix=inputs=2:duration=first:dropout_transition=0[aout_mix];[aout_mix]volume=2.0[aout]',
                 '-map', '0:v', '-map', '[aout]',
                 '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-shortest', final_video
             ]
