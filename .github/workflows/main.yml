@@ -1,4 +1,4 @@
-name: Auto Render Dark Psychology Long Video
+name: Auto Render Human Behavior Long Video
 
 on:
   repository_dispatch:
