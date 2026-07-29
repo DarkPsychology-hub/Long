@@ -1,4 +1,5 @@
 import os, sys, json, subprocess, time, random, asyncio, re, string
+import urllib.parse
 import aiohttp
 import edge_tts
 import shutil
@@ -17,8 +18,9 @@ channel_name = "Dark Psychology®"
 
 print(f"DEBUG: Processing {len(scenes_data)} scenes async...")
 
-# 👇 Ultra-safe fallback keywords for guaranteed videos
-FALLBACK_KEYWORDS = ["shadows moving", "dark room", "cinematic face", "night city", "abstract dark", "black background"]
+# --- SMART DYNAMIC FALLBACK KEYWORDS ---
+fallback_env = os.environ.get('FALLBACK_KEYWORDS', 'shadows moving, dark room, cinematic face, night city, abstract dark, black background')
+FALLBACK_KEYWORDS = [kw.strip() for kw in fallback_env.split(',')]
 
 TEMP_DIR = "/dev/shm" if os.path.exists("/dev/shm") else os.getcwd()
 
@@ -76,10 +78,14 @@ async def process_scene(session, i, scene):
                 try:
                     await asyncio.sleep(random.uniform(0.5, 1.5)) # Prevent rate-limiting
                     page = 1 if query == keyword else random.randint(1, 2) 
-                    # Removed size restriction to maximize available videos
-                    url = f"https://api.pexels.com/videos/search?query={query}&per_page=15&page={page}&orientation=landscape"
+                    url = f"https://api.pexels.com/videos/search?query={urllib.parse.quote(query)}&per_page=15&page={page}&orientation=landscape"
                     
                     async with session.get(url, headers={"Authorization": pexels_key}, timeout=10) as response:
+                        # [IMPROVED]: Added Rate Limit (429) Handling
+                        if response.status == 429:
+                            await asyncio.sleep(2)
+                            continue
+                            
                         if response.status == 200:
                             res = await response.json()
                             videos = res.get('videos', [])
@@ -98,11 +104,14 @@ async def process_scene(session, i, scene):
                                         async with session.get(vid_url, timeout=15) as vid_resp:
                                             if vid_resp.status == 200:
                                                 vid_bytes = await vid_resp.read()
-                                                if len(vid_bytes) > 50000: # Ensure file is not corrupted
+                                                # [IMPROVED]: Increased size threshold to 200KB
+                                                if len(vid_bytes) > 200000: 
                                                     with open(vid_path, "wb") as f:
                                                         f.write(vid_bytes)
                                                     is_valid_video = True
                                                     break # Exit inner download loop
+                                                else:
+                                                    print(f"Video file too small ({len(vid_bytes)} bytes), discarding.")
                                     except Exception:
                                         continue # Try the next video link
                 except Exception:
@@ -115,15 +124,15 @@ async def process_scene(session, i, scene):
         if is_valid_video:
             cmd = ['ffmpeg', '-y', '-ignore_editlist', '1', '-stream_loop', '-1', '-fflags', '+genpts', '-i', vid_path, '-ss', '0.2', '-i', raw_mp3]
             if has_pop: cmd += ['-i', pop_path]
-            v_filter = f"[0:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,format=yuv420p,fps=30,eq=contrast=1.2:saturation=0.85,drawtext=text='{channel_name}':fontcolor=white@0.3:fontsize=48:x=w-tw-50:y=h-th-50,fade=t=in:st=0:d=0.5,fade=t=out:st={fade_out}:d=0.5[v]"
+            # Standardizing contrast/saturation from base
+            v_filter = f"[0:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,format=yuv420p,fps=30,eq=contrast=1.1:saturation=1.25,drawtext=text='{channel_name}':fontcolor=white@0.5:fontsize=48:x=w-tw-50:y=h-th-50,fade=t=in:st=0:d=0.5,fade=t=out:st={fade_out}:d=0.5[v]"
         else:
-            # Absolute worst-case fallback (if Pexels is completely down)
-            cmd = ['ffmpeg', '-y', '-f', 'lavfi', '-i', f'color=c=#101015:s=1920x1080:d={dur}', '-ss', '0.2', '-i', raw_mp3]
+            cmd = ['ffmpeg', '-y', '-f', 'lavfi', '-i', f'color=c=#151525:s=1920x1080:d={dur}', '-ss', '0.2', '-i', raw_mp3]
             if has_pop: cmd += ['-i', pop_path]
-            v_filter = f"[0:v]drawtext=text='{channel_name}':fontcolor=white@0.3:fontsize=48:x=w-tw-50:y=h-th-50,fade=t=in:st=0:d=0.5,fade=t=out:st={fade_out}:d=0.5[v]"
+            v_filter = f"[0:v]drawtext=text='{channel_name}':fontcolor=white@0.5:fontsize=48:x=w-tw-50:y=h-th-50,fade=t=in:st=0:d=0.5,fade=t=out:st={fade_out}:d=0.5[v]"
 
         if has_pop:
-            a_filter = "[1:a]volume=1.0[voice];[2:a]volume=0.3[pop];[voice][pop]amix=inputs=2:duration=first:dropout_transition=0[aout_mix];[aout_mix]volume=2.0[aout]"
+            a_filter = "[1:a]volume=1.0[voice];[2:a]volume=0.8[pop];[voice][pop]amix=inputs=2:duration=first:dropout_transition=0[aout_mix];[aout_mix]volume=2.0[aout]"
             filter_complex = f"{v_filter};{a_filter}"
             a_map = '[aout]'
         else:
@@ -181,10 +190,9 @@ async def main_pipeline():
 
         bgm_path = os.path.abspath("bgm.mp3")
         if os.path.exists(bgm_path):
-            # 👇 FIX: BGM Volume significantly increased to 0.30 (30%)
             bgm_cmd = [
                 'ffmpeg', '-y', '-i', raw_video, '-stream_loop', '-1', '-i', bgm_path,
-                '-filter_complex', '[0:a]volume=1.0[voice];[1:a]volume=0.30[bgm];[voice][bgm]amix=inputs=2:duration=first:dropout_transition=0[aout_mix];[aout_mix]volume=2.0[aout]',
+                '-filter_complex', '[0:a]volume=1.0[voice];[1:a]volume=0.25[bgm];[voice][bgm]amix=inputs=2:duration=first:dropout_transition=0[aout_mix];[aout_mix]volume=2.0[aout]',
                 '-map', '0:v', '-map', '[aout]',
                 '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-shortest', final_video
             ]
@@ -200,14 +208,14 @@ async def main_pipeline():
             if os.path.exists(r['aud']): os.remove(r['aud'])
 
         # ==========================================
-        # PHASE 3: GITHUB RELEASES
+        # PHASE 3: GITHUB RELEASES (THE ULTIMATE FIX)
         # ==========================================
         video_link = None
         print("\n🚀 Uploading Video directly to GitHub Releases...")
         
         run_id = os.environ.get('GITHUB_RUN_ID', str(int(time.time())))
         tag_name = f"vid-{run_id}"
-        repo_name = "DarkPsychology-hub/Long" 
+        repo_name = os.environ.get('GITHUB_REPOSITORY', "DarkPsychology-hub/Long") 
         
         try:
             cmd = ['gh', 'release', 'create', tag_name, final_video, '--repo', repo_name, '--notes', 'Automated Video Render']
