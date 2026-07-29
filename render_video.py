@@ -6,7 +6,7 @@ import shutil
 
 # --- VARIABLES ---
 scenes_data = json.loads(os.environ.get('SCENES_DATA', '[]'))
-title = os.environ.get('TITLE', 'Dark Psychology Documentary')
+title = os.environ.get('TITLE', 'Human Behavior Documentary')
 description = os.environ.get('DESCRIPTION', 'Uncovering the dark truths of human behavior.')
 thumbnail_prompt = os.environ.get('THUMBNAIL_PROMPT', 'Cinematic dark psychological thumbnail')
 pexels_key = os.environ.get('PEXELS_API_KEY')
@@ -14,7 +14,7 @@ chat_id = os.environ.get('CHAT_ID')
 telegram_token = os.environ.get('TELEGRAM_BOT_TOKEN')
 
 # 👇 Channel Watermark
-channel_name = "Dark Psychology®" 
+channel_name = "Human Behavior®" 
 
 print(f"DEBUG: Processing {len(scenes_data)} scenes async...")
 
@@ -32,6 +32,41 @@ async def get_audio_duration(file_path):
         return float(stdout.decode().strip())
     except:
         return 5.0 
+
+async def fetch_pexels_video(session, keyword):
+    queries_to_try = [keyword] + FALLBACK_KEYWORDS
+    for query in queries_to_try:
+        for attempt in range(2):
+            try:
+                await asyncio.sleep(random.uniform(0.1, 0.5))
+                # Jab attempts badhein toh safe page=1 rakho taaki khali result na aaye
+                random_page = random.randint(1, 2) if attempt == 0 else 1 
+                url = f"https://api.pexels.com/videos/search?query={urllib.parse.quote(query)}&per_page=15&page={random_page}&orientation=landscape"
+                
+                async with session.get(url, headers={"Authorization": pexels_key}, timeout=10) as response:
+                    # [IMPROVED]: Added Rate Limit (429) Handling
+                    if response.status == 429:
+                        await asyncio.sleep(2)
+                        continue
+                        
+                    if response.status == 200:
+                        res = await response.json()
+                        videos = res.get('videos', [])
+                        if videos:
+                            random.shuffle(videos)
+                            for v in videos[:3]:
+                                try:
+                                    vid_url = v['video_files'][0]['link']
+                                    for vf in v['video_files']:
+                                        if vf.get('quality') == 'hd':
+                                            vid_url = vf['link']
+                                            break
+                                    return vid_url
+                                except Exception:
+                                    continue
+            except Exception:
+                continue
+    return None
 
 async def process_scene(session, i, scene):
     keyword = scene.get('keyword', 'dark atmosphere')
@@ -67,55 +102,28 @@ async def process_scene(session, i, scene):
         
         # --- 2. GUARANTEED VIDEO FETCH & DOWNLOAD LOOP ---
         is_valid_video = False
-        queries_to_try = [keyword] + FALLBACK_KEYWORDS
+        vid_url = await fetch_pexels_video(session, keyword)
         
-        for query in queries_to_try:
-            if is_valid_video: 
-                break
-            for attempt in range(2):
-                if is_valid_video: 
-                    break
+        for download_attempt in range(3):
+            if not vid_url:
+                vid_url = await fetch_pexels_video(session, random.choice(FALLBACK_KEYWORDS))
+                
+            if vid_url:
                 try:
-                    await asyncio.sleep(random.uniform(0.5, 1.5)) # Prevent rate-limiting
-                    page = 1 if query == keyword else random.randint(1, 2) 
-                    url = f"https://api.pexels.com/videos/search?query={urllib.parse.quote(query)}&per_page=15&page={page}&orientation=landscape"
-                    
-                    async with session.get(url, headers={"Authorization": pexels_key}, timeout=10) as response:
-                        # [IMPROVED]: Added Rate Limit (429) Handling
-                        if response.status == 429:
-                            await asyncio.sleep(2)
-                            continue
-                            
-                        if response.status == 200:
-                            res = await response.json()
-                            videos = res.get('videos', [])
-                            if videos:
-                                random.shuffle(videos)
-                                # Try downloading up to 3 different videos to guarantee success
-                                for v in videos[:3]:
-                                    try:
-                                        # Get HD link if available, else fallback to standard
-                                        vid_url = v['video_files'][0]['link']
-                                        for vf in v['video_files']:
-                                            if vf.get('quality') == 'hd':
-                                                vid_url = vf['link']
-                                                break
-                                                
-                                        async with session.get(vid_url, timeout=15) as vid_resp:
-                                            if vid_resp.status == 200:
-                                                vid_bytes = await vid_resp.read()
-                                                # [IMPROVED]: Increased size threshold to 200KB
-                                                if len(vid_bytes) > 200000: 
-                                                    with open(vid_path, "wb") as f:
-                                                        f.write(vid_bytes)
-                                                    is_valid_video = True
-                                                    break # Exit inner download loop
-                                                else:
-                                                    print(f"Video file too small ({len(vid_bytes)} bytes), discarding.")
-                                    except Exception:
-                                        continue # Try the next video link
-                except Exception:
-                    continue # Try the next query/attempt
+                    async with session.get(vid_url, timeout=15) as vid_resp:
+                        if vid_resp.status == 200:
+                            vid_bytes = await vid_resp.read()
+                            # [IMPROVED]: Increased size threshold to 200KB
+                            if len(vid_bytes) > 200000:
+                                with open(vid_path, "wb") as f:
+                                    f.write(vid_bytes)
+                                is_valid_video = True
+                                break 
+                            else:
+                                print(f"Video file too small ({len(vid_bytes)} bytes) on attempt {download_attempt+1}, discarding.")
+                except Exception as e:
+                    print(f"Failed to download video for scene {i} on attempt {download_attempt+1}: {str(e)}")
+            vid_url = None
 
         # --- 3. VIDEO RENDER ---
         pop_path = os.path.abspath("pop.mp3")
@@ -124,15 +132,14 @@ async def process_scene(session, i, scene):
         if is_valid_video:
             cmd = ['ffmpeg', '-y', '-ignore_editlist', '1', '-stream_loop', '-1', '-fflags', '+genpts', '-i', vid_path, '-ss', '0.2', '-i', raw_mp3]
             if has_pop: cmd += ['-i', pop_path]
-            # Standardizing contrast/saturation from base
-            v_filter = f"[0:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,format=yuv420p,fps=30,eq=contrast=1.1:saturation=1.25,drawtext=text='{channel_name}':fontcolor=white@0.5:fontsize=48:x=w-tw-50:y=h-th-50,fade=t=in:st=0:d=0.5,fade=t=out:st={fade_out}:d=0.5[v]"
+            v_filter = f"[0:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,format=yuv420p,fps=30,eq=contrast=1.2:saturation=0.85,drawtext=text='{channel_name}':fontcolor=white@0.3:fontsize=48:x=w-tw-50:y=h-th-50,fade=t=in:st=0:d=0.5,fade=t=out:st={fade_out}:d=0.5[v]"
         else:
-            cmd = ['ffmpeg', '-y', '-f', 'lavfi', '-i', f'color=c=#151525:s=1920x1080:d={dur}', '-ss', '0.2', '-i', raw_mp3]
+            cmd = ['ffmpeg', '-y', '-f', 'lavfi', '-i', f'color=c=#101015:s=1920x1080:d={dur}', '-ss', '0.2', '-i', raw_mp3]
             if has_pop: cmd += ['-i', pop_path]
-            v_filter = f"[0:v]drawtext=text='{channel_name}':fontcolor=white@0.5:fontsize=48:x=w-tw-50:y=h-th-50,fade=t=in:st=0:d=0.5,fade=t=out:st={fade_out}:d=0.5[v]"
+            v_filter = f"[0:v]drawtext=text='{channel_name}':fontcolor=white@0.3:fontsize=48:x=w-tw-50:y=h-th-50,fade=t=in:st=0:d=0.5,fade=t=out:st={fade_out}:d=0.5[v]"
 
         if has_pop:
-            a_filter = "[1:a]volume=1.0[voice];[2:a]volume=0.8[pop];[voice][pop]amix=inputs=2:duration=first:dropout_transition=0[aout_mix];[aout_mix]volume=2.0[aout]"
+            a_filter = "[1:a]volume=1.0[voice];[2:a]volume=0.3[pop];[voice][pop]amix=inputs=2:duration=first:dropout_transition=0[aout_mix];[aout_mix]volume=2.0[aout]"
             filter_complex = f"{v_filter};{a_filter}"
             a_map = '[aout]'
         else:
@@ -208,13 +215,15 @@ async def main_pipeline():
             if os.path.exists(r['aud']): os.remove(r['aud'])
 
         # ==========================================
-        # PHASE 3: GITHUB RELEASES (THE ULTIMATE FIX)
+        # PHASE 3: GITHUB RELEASES
         # ==========================================
         video_link = None
         print("\n🚀 Uploading Video directly to GitHub Releases...")
         
         run_id = os.environ.get('GITHUB_RUN_ID', str(int(time.time())))
         tag_name = f"vid-{run_id}"
+        
+        # 👇 Repo name updated as per JSON / Screenshot 👇
         repo_name = os.environ.get('GITHUB_REPOSITORY', "DarkPsychology-hub/Long") 
         
         try:
